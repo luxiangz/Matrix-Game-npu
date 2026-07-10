@@ -200,6 +200,7 @@ def flash_attention(
 
     _detect_backends()
     b, lq, lk = q.size(0), q.size(1), k.size(1)
+    nq, nk, c1, c2 = q.size(2), k.size(2), q.size(3), v.size(3)
     out_dtype = q.dtype
 
     def half(x):
