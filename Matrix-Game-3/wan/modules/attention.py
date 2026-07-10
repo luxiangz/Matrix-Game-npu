@@ -218,16 +218,16 @@ def flash_attention(
     # varlen 预处理
     if q_lens is None:
         q = half(q.flatten(0, 1))
-        q_lens = torch.tensor([lq] * b, dtype=torch.int32,
-                              device=q.device, non_blocking=True)
+        q_lens = torch.tensor([lq] * b, dtype=torch.int32).to(
+            device=q.device)
     else:
         q = half(torch.cat([u[:v] for u, v in zip(q, q_lens)]))
 
     if k_lens is None:
         k = half(k.flatten(0, 1))
         v = half(v.flatten(0, 1))
-        k_lens = torch.tensor([lk] * b, dtype=torch.int32,
-                              device=k.device, non_blocking=True)
+        k_lens = torch.tensor([lk] * b, dtype=torch.int32).to(
+            device=k.device)
     else:
         k = half(torch.cat([u[:v] for u, v in zip(k, k_lens)]))
         v = half(torch.cat([u[:v] for u, v in zip(v, k_lens)]))
