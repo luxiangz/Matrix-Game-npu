@@ -62,13 +62,10 @@ def flash_attention(
     b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
 
     # ── 无 FA 可用时，直接用 SDPA (在 varlen 转换前处理, 避免 shape 问题) ──
-    _fa_available = FLASH_ATTN_3_AVAILABLE or FLASH_ATTN_2_AVAILABLE or _MINDIESD_AVAILABLE
+    _fa_available = FLASH_ATTN_3_AVAILABLE or FLASH_ATTN_2_AVAILABLE  # NVIDIA only
     _fa_disabled = (version == '0')
 
     if _fa_disabled or not _fa_available:
-        if not _fa_available and not _fa_disabled:
-            pass  # fallback to SDPA silently
-
         # NPU mindiesd path (dense → BNSD → mindiesd.attention_forward)
         if _MINDIESD_AVAILABLE and not _fa_disabled:
             try:
