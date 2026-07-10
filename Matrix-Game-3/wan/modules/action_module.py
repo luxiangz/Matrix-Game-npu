@@ -32,7 +32,7 @@ class WanRMSNorm(nn.Module):
 def sinusoidal_embedding_1d(dim, position):
     assert dim % 2 == 0
     half = dim // 2
-    position = position.type(torch.float64)
+    position = position.float()  # NPU: float32 避免 double 算子不兼容
 
     sinusoid = torch.outer(position, torch.pow(10000, -torch.arange(half).to(position).div(half)))
     x = torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1)

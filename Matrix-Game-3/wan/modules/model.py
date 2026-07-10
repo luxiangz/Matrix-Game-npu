@@ -229,7 +229,7 @@ __all__ = ['WanModel']
 def sinusoidal_embedding_1d(dim, position):
     assert dim % 2 == 0
     half = dim // 2
-    position = position.type(torch.float64)
+    position = position.float()  # NPU: float32 避免 double 算子不兼容
 
     sinusoid = torch.outer(
         position, torch.pow(10000, -torch.arange(half).to(position).div(half)))
@@ -862,14 +862,15 @@ class WanModel(ModelMixin, ConfigMixin):
                 c_t = c - 2 * (c // 3)
                 c_h = c // 3
                 c_w = c // 3
-                rope_epsilon = torch.linspace(-1, 1, num_heads, dtype=torch.float64)
+                # NPU: 使用 float32 避免 complex128 (Ascend 不支持 complex128 算子)
+                rope_epsilon = torch.linspace(-1, 1, num_heads, dtype=torch.float32)
                 theta_base = 10000.0
                 theta_hat = theta_base * (1 + sigma_theta * rope_epsilon)
 
                 def build_freqs(seq_len, c_part):
-                    exp = torch.arange(c_part, dtype=torch.float64) / c_part
+                    exp = torch.arange(c_part, dtype=torch.float32) / c_part
                     omega = 1.0 / torch.pow(theta_hat.unsqueeze(1), exp.unsqueeze(0))
-                    pos = torch.arange(seq_len, dtype=torch.float64)
+                    pos = torch.arange(seq_len, dtype=torch.float32)
                     angles = pos.view(1, -1, 1) * omega.unsqueeze(1)
                     return torch.polar(torch.ones_like(angles), angles)
 
