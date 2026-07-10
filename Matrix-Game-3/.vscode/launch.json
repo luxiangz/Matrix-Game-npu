@@ -1,0 +1,211 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "🚀 NPU: 单卡推理 (蒸馏模型)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "generate",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "WAN_FA_VERSION": "0",
+                "WAN_DISABLE_INT8": "1",
+                "WAN_DISABLE_COMPILE": "1",
+                "CUDA_VISIBLE_DEVICES": ""
+            },
+            "args": [
+                "--size", "704*1280",
+                "--ckpt_dir", "/data1/weights/Matrix-Game-3.0",
+                "--fa_version", "0",
+                "--num_iterations", "2",
+                "--num_inference_steps", "3",
+                "--image", "demo_images/001/image.png",
+                "--prompt", "A colorful, animated cityscape with a gas station and various buildings.",
+                "--save_name", "debug_test",
+                "--seed", "42",
+                "--vae_type", "mg_lightvae",
+                "--lightvae_pruning_rate", "0.5",
+                "--output_dir", "./output"
+            ]
+        },
+        {
+            "name": "🐌 NPU: 单卡推理 (基础模型, 50步)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "generate",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "WAN_FA_VERSION": "0",
+                "WAN_DISABLE_INT8": "1",
+                "WAN_DISABLE_COMPILE": "1",
+                "CUDA_VISIBLE_DEVICES": ""
+            },
+            "args": [
+                "--size", "704*1280",
+                "--ckpt_dir", "/data1/weights/Matrix-Game-3.0",
+                "--fa_version", "0",
+                "--use_base_model",
+                "--num_iterations", "2",
+                "--num_inference_steps", "50",
+                "--sample_guide_scale", "5.0",
+                "--image", "demo_images/001/image.png",
+                "--prompt", "A colorful, animated cityscape with a gas station and various buildings.",
+                "--save_name", "debug_base",
+                "--seed", "42",
+                "--vae_type", "mg_lightvae",
+                "--lightvae_pruning_rate", "0.5",
+                "--output_dir", "./output"
+            ]
+        },
+        {
+            "name": "🎮 NPU: 交互模式推理",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "generate",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "WAN_FA_VERSION": "0",
+                "WAN_DISABLE_INT8": "1",
+                "WAN_DISABLE_COMPILE": "1",
+                "CUDA_VISIBLE_DEVICES": ""
+            },
+            "args": [
+                "--size", "704*1280",
+                "--ckpt_dir", "/data1/weights/Matrix-Game-3.0",
+                "--fa_version", "0",
+                "--interactive",
+                "--num_iterations", "4",
+                "--num_inference_steps", "3",
+                "--image", "demo_images/001/image.png",
+                "--prompt", "A colorful, animated cityscape with a gas station and various buildings.",
+                "--save_name", "debug_interactive",
+                "--seed", "42",
+                "--vae_type", "mg_lightvae",
+                "--lightvae_pruning_rate", "0.5",
+                "--output_dir", "./output"
+            ]
+        },
+        {
+            "name": "🧪 本地: 仅测试代码路径 (无模型加载)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/generate.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "WAN_FA_VERSION": "0",
+                "WAN_DISABLE_INT8": "1",
+                "WAN_DISABLE_COMPILE": "1"
+            },
+            "args": [
+                "--help"
+            ]
+        },
+        {
+            "name": "🔬 调试: pipeline/inference_interactive_pipeline.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/pipeline/inference_interactive_pipeline.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "WAN_FA_VERSION": "0",
+                "WAN_DISABLE_INT8": "1",
+                "WAN_DISABLE_COMPILE": "1"
+            }
+        },
+        {
+            "name": "🔬 调试: wan/modules/model.py (DiT 模型加载)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/wan/modules/model.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "WAN_FA_VERSION": "0",
+                "WAN_DISABLE_INT8": "1",
+                "WAN_DISABLE_COMPILE": "1"
+            }
+        },
+        {
+            "name": "🔬 调试: wan/modules/attention.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/wan/modules/attention.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "WAN_FA_VERSION": "0",
+                "WAN_DISABLE_INT8": "1",
+                "WAN_DISABLE_COMPILE": "1"
+            }
+        },
+        {
+            "name": "📦 NPU: 多卡推理 (torchrun, 需手动设 WORLD_SIZE)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "generate",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "WAN_FA_VERSION": "0",
+                "WAN_DISABLE_INT8": "1",
+                "WAN_DISABLE_COMPILE": "1",
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": "29500",
+                "RANK": "0",
+                "WORLD_SIZE": "1",
+                "LOCAL_RANK": "0"
+            },
+            "args": [
+                "--size", "704*1280",
+                "--ckpt_dir", "/data1/weights/Matrix-Game-3.0",
+                "--fa_version", "0",
+                "--num_iterations", "2",
+                "--num_inference_steps", "3",
+                "--image", "demo_images/001/image.png",
+                "--prompt", "A test debug scene.",
+                "--save_name", "debug_dist",
+                "--seed", "42",
+                "--vae_type", "mg_lightvae",
+                "--lightvae_pruning_rate", "0.5",
+                "--output_dir", "./output"
+            ]
+        },
+        {
+            "name": "🔗 远程: SSH 附加到 NPU 服务器进程",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "10.0.0.1",
+                "port": 5678
+            },
+            "pathMappings": [
+                {
+                    "localRoot": "${workspaceFolder}",
+                    "remoteRoot": "/home/user/Matrix-Game-3"
+                }
+            ],
+            "justMyCode": false
+        }
+    ]
+}

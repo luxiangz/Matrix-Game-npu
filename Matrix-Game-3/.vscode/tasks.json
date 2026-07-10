@@ -1,0 +1,110 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "NPU: 单卡推理 (bash)",
+            "type": "shell",
+            "command": "bash",
+            "args": [
+                "run_npu.sh"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "NPU: 多卡推理 8卡 (bash)",
+            "type": "shell",
+            "command": "bash",
+            "args": [
+                "-c",
+                "NUM_NPUS=8 bash run_npu.sh"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "NPU: 交互模式 (bash)",
+            "type": "shell",
+            "command": "bash",
+            "args": [
+                "-c",
+                "bash run_npu.sh --interactive"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "NPU: 基础模型 (bash)",
+            "type": "shell",
+            "command": "bash",
+            "args": [
+                "-c",
+                "bash run_npu.sh --use_base_model"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "检查 NPU 环境",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "-c",
+                "import torch_npu; print('NPU available:', torch_npu.npu.is_available()); print('NPU count:', torch_npu.npu.device_count()); print('NPU name:', torch_npu.npu.get_device_name(0) if torch_npu.npu.is_available() else 'N/A')"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "检查权重文件",
+            "type": "shell",
+            "command": "bash",
+            "args": [
+                "-c",
+                "echo '=== /data1/weights/Matrix-Game-3.0 ===' && ls -la /data1/weights/Matrix-Game-3.0/ 2>/dev/null || echo '⚠️ 权重目录不可访问 (可能不在 NPU 机器上)'"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        }
+    ]
+}
