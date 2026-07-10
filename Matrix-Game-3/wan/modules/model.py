@@ -726,10 +726,11 @@ class Head(nn.Module):
             # --- Linear Layer Profiling (Head) ---
             if profiler is not None and 'linear_layers' in profiler:
                 norm_x = self.norm(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2)
-                torch.cuda.synchronize()
+                from wan.npu_utils import synchronize as _sync
+                _sync()
                 l_start = time.time()
                 x = self.head(norm_x)
-                torch.cuda.synchronize()
+                _sync()
                 l_dur = time.time() - l_start
                 key = ("Head.head", self.head.in_features, self.head.out_features, "Int8Linear" if hasattr(self.head, "weight_int8") else "Linear")
                 profiler['linear_layers'][key] = profiler['linear_layers'].get(key, 0.0) + l_dur

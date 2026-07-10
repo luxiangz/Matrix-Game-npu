@@ -3,6 +3,7 @@ import torch
 import torch._dynamo
 torch._dynamo.config.recompile_limit = 1024
 torch._dynamo.config.suppress_errors = True
+from wan.npu_utils import synchronize as _sync_device
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1275,13 +1276,13 @@ class Wan2_2_VAE:
         else:
             z = z / inv_std + mean
         if profiler is not None:
-            torch.cuda.synchronize()
+            _sync_device()
             profiler['vae_prep'] = profiler.get('vae_prep', 0) + (time.time() - t_prep)
 
         t_conv2 = time.time()
         x = self.model.conv2(z)
         if profiler is not None:
-            torch.cuda.synchronize()
+            _sync_device()
             profiler['vae_conv2'] = profiler.get('vae_conv2', 0) + (time.time() - t_conv2)
 
         iter_ = x.shape[2]
@@ -1301,14 +1302,14 @@ class Wan2_2_VAE:
             segment_outputs.append(chunk_out)
         out = segment_outputs[0] if len(segment_outputs) == 1 else torch.cat(segment_outputs, dim=2)
         if profiler is not None:
-            torch.cuda.synchronize()
+            _sync_device()
             profiler['vae_decoder_loop'] = profiler.get('vae_decoder_loop', 0) + (time.time() - t_loop)
 
         t_post = time.time()
         out = unpatchify(out, patch_size=2)
         out = out.clamp_(-1, 1)
         if profiler is not None:
-            torch.cuda.synchronize()
+            _sync_device()
             profiler['vae_post'] = profiler.get('vae_post', 0) + (time.time() - t_post)
         return out
 
