@@ -6,22 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .tokenizers import HuggingfaceTokenizer
-
-
-def _get_default_device():
-    """安全获取默认设备 (兼容 CUDA / NPU / CPU)."""
-    try:
-        import torch_npu
-        if torch_npu.npu.is_available():
-            return torch.device("npu")
-    except (ImportError, AssertionError, RuntimeError):
-        pass
-    try:
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-    except (AssertionError, RuntimeError):
-        pass
-    return torch.device("cpu")
+from wan.npu_utils import get_device as _get_npu_device
 
 __all__ = [
     'T5Model',
@@ -495,7 +480,7 @@ class T5EncoderModel:
         shard_fn=None,
     ):
         if device is None:
-            device = _get_default_device()
+            device = _get_npu_device()
         self.text_len = text_len
         self.dtype = dtype
         self.device = device

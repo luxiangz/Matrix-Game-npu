@@ -1,6 +1,8 @@
 import torch
 from typing import Union, Tuple, List
 
+from wan.npu_utils import get_device as _get_npu_device
+
 
 def _to_tuple(x, dim=2):
     if isinstance(x, int):
@@ -44,7 +46,7 @@ def get_meshgrid_nd(start, *args, dim=2):
     axis_grid = []
     for i in range(dim):
         a, b, n = start[i], stop[i], num[i]
-        g = torch.linspace(a, b, n + 1, dtype=torch.float32, device=torch.cuda.current_device())[:n]
+        g = torch.linspace(a, b, n + 1, dtype=torch.float32, device=_get_npu_device())[:n]
         axis_grid.append(g)
     grid = torch.meshgrid(*axis_grid, indexing="ij")  # dim x [W, H, D]
     grid = torch.stack(grid, dim=0)  # [dim, W, H, D]
@@ -264,7 +266,7 @@ def get_1d_rotary_pos_embed(
         freqs_cos, freqs_sin: Precomputed frequency tensor with real and imaginary parts separately. [S, D]
     """
     if isinstance(pos, int):
-        pos = torch.arange(pos, device=torch.cuda.current_device()).float()
+        pos = torch.arange(pos, device=_get_npu_device()).float()
 
     # proposed by reddit user bloc97, to rescale rotary embeddings to longer sequence length without fine-tuning
     # has some connection to NTK literature
@@ -272,7 +274,7 @@ def get_1d_rotary_pos_embed(
         theta *= theta_rescale_factor ** (dim / (dim - 2))
 
     freqs = 1.0 / (
-        theta ** (torch.arange(0, dim, 2, device=torch.cuda.current_device())[: (dim // 2)].float() / dim)
+        theta ** (torch.arange(0, dim, 2, device=_get_npu_device())[: (dim // 2)].float() / dim)
     )
     freqs = torch.outer(pos * interpolation_factor, freqs)  # [S, D/2]
     if use_real:

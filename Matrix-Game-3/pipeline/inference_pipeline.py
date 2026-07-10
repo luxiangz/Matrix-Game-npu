@@ -18,6 +18,7 @@ from einops import rearrange
 from functools import partial
 from wan.distributed.fsdp import shard_model
 from wan.distributed.sequence_parallel import sp_attn_forward, sp_dit_forward
+from wan.npu_utils import get_device as _get_npu_device
 from wan.distributed.util import get_world_size
 from wan.modules import WanModel
 from wan.modules.t5 import T5EncoderModel
@@ -72,7 +73,7 @@ class MatrixGame3Pipeline:
                 Convert DiT model parameters dtype to 'config.param_dtype'.
                 Only works without FSDP.
         """
-        self.device = torch.device(f"cuda:{device_id}" if torch.cuda.is_available() else f"npu:{device_id}")
+        self.device = _get_npu_device(device_id)
         self.config = config
         self.rank = rank
         self.t5_cpu = t5_cpu

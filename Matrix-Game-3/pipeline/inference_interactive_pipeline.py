@@ -21,6 +21,7 @@ from wan.distributed.util import get_world_size
 from wan.modules import WanModel
 from wan.modules.t5 import T5EncoderModel
 from wan.modules.vae2_2 import Wan2_2_VAE
+from wan.npu_utils import get_device as _get_npu_device
 from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from utils.visualize import process_video
 from utils.cam_utils import compute_relative_poses, select_memory_idx_fov, get_intrinsics, _interpolate_camera_poses_handedness
@@ -112,7 +113,7 @@ class MatrixGame3Pipeline:
         """
         if device_id is None:
             device_id = 0
-        self.device = torch.device(f"cuda:{device_id}" if torch.cuda.is_available() else f"npu:{device_id}")
+        self.device = _get_npu_device(device_id)
         self.config = config
         self.rank = rank
         self.t5_cpu = t5_cpu
