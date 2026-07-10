@@ -62,10 +62,11 @@ def SE3_inverse(T: torch.Tensor) -> torch.Tensor:
 
 
 def compute_relative_poses(
-    c2ws_mat: torch.Tensor, 
-    framewise: bool = False, 
-    normalize_trans: bool = True, 
+    c2ws_mat: torch.Tensor,
+    framewise: bool = False,
+    normalize_trans: bool = True,
 ) -> torch.Tensor:
+    c2ws_mat = c2ws_mat.float()  # NPU matmul 不支持 float64
     ref_w2cs = SE3_inverse(c2ws_mat[0:1])
     relative_poses = torch.matmul(ref_w2cs, c2ws_mat)
     relative_poses[0] = torch.eye(4, device=c2ws_mat.device, dtype=c2ws_mat.dtype)
@@ -588,7 +589,7 @@ def get_extrinsics(video_rotation, video_position):
         [1, 0, 0],  # Y_cam -> Z_world
         [0, -1, 0]   # Z_cam -> X_world
     ])
-    Extrinsics = torch.from_numpy(np.array(Extrinsics_vid))
+    Extrinsics = torch.from_numpy(np.array(Extrinsics_vid)).float()
     Extrinsics[:, :3, :3] = Extrinsics[:, :3, :3] @ R_init
     Extrinsics[:,:3,3] = Extrinsics[:,:3,3]*0.01 
     return Extrinsics
