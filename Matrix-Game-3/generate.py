@@ -85,6 +85,11 @@ def _parse_args():
     parser.add_argument("--interactive", action="store_true", help="Enable interactive inference.")
     parser.add_argument("--use_base_model", action="store_true", help="Enable base model inference.")
     args = parser.parse_args()
+    # 将 fa_version 同步到环境变量, 并重置 attention 后端缓存
+    if args.fa_version is not None:
+        os.environ["WAN_FA_VERSION"] = args.fa_version
+        from wan.modules.attention import reset_attention_backend
+        reset_attention_backend()
     _validate_args(args)
     return args
 

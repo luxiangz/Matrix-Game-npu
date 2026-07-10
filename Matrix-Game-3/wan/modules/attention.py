@@ -127,6 +127,18 @@ def get_attention_backend() -> str:
     return _ATTN_BACKEND
 
 
+def reset_attention_backend() -> None:
+    """重置 attention 后端检测缓存 — 在设置 WAN_FA_VERSION 后调用."""
+    global _ATTN_BACKEND, _MINDIESD_AVAILABLE, _NPU_FA_AVAILABLE
+    global _FA3_AVAILABLE, _FA2_AVAILABLE
+    _ATTN_BACKEND = "sdpa"
+    _MINDIESD_AVAILABLE = False
+    _NPU_FA_AVAILABLE = False
+    _FA3_AVAILABLE = False
+    _FA2_AVAILABLE = False
+    _detect_backends()
+
+
 # ── NPU Flash Attention 实现 ────────────────────────
 
 def _npu_flash_attention(
@@ -151,32 +163,36 @@ def _npu_flash_attention(
 
     # mindiesd 路径
     if _MINDIESD_AVAILABLE:
-        import mindiesd
-        # mindiesd 使用与 flash_attn 兼容的接口
-        return mindiesd.flash_attn_func(
-            q, k, v,
-            dropout_p=0.0,
-            softmax_scale=softmax_scale,
-            causal=causal,
-        )
+        try:
+            import mindiesd
+            return mindiesd.flash_attn_func(
+                q, k, v,
+                dropout_p=0.0,
+                softmax_scale=softmax_scale,
+                causal=causal,
+            )
+        except Exception as e:
+            _logger.warning("mindiesd failed (%s), falling back to SDPA", e)
 
     # torch_npu.npu_fusion_attention 路径
     if _NPU_FA_AVAILABLE:
-        import torch_npu
-        # NPU 融合注意力需要 [B, N, S, D] 格式
-        q_npu = q.transpose(1, 2).contiguous()  # [B, Nq, Lq, C1]
-        k_npu = k.transpose(1, 2).contiguous()  # [B, Nk, Lk, C1]
-        v_npu = v.transpose(1, 2).contiguous()  # [B, Nk, Lk, C2]
+        try:
+            import torch_npu
+            q_npu = q.transpose(1, 2).contiguous()
+            k_npu = k.transpose(1, 2).contiguous()
+            v_npu = v.transpose(1, 2).contiguous()
+            out = torch_npu.npu_fusion_attention(
+                q_npu, k_npu, v_npu,
+                head_num=nq,
+                input_layout="BNSD",
+                scale=softmax_scale,
+            )
+            return out.transpose(1, 2).contiguous()
+        except Exception as e:
+            _logger.warning("npu_fusion_attention failed (%s), falling back to SDPA", e)
 
-        out = torch_npu.npu_fusion_attention(
-            q_npu, k_npu, v_npu,
-            head_num=nq,
-            input_layout="BNSD",
-            scale=softmax_scale,
-        )
-        return out.transpose(1, 2).contiguous()  # back to [B, Lq, Nq, C2]
-
-    raise RuntimeError("NPU FA not available (should not reach here)")
+    # NPU FA 均不可用或失败
+    raise RuntimeError("All NPU FA backends failed or unavailable")
 
 
 # ── 通用 flash_attention 函数 ───────────────────────
@@ -240,16 +256,19 @@ def flash_attention(
 
     # ── NPU 路径 ──
     if _ATTN_BACKEND in ("mindiesd", "npu_fa"):
-        # NPU FA 目前不支持 varlen cu_seqlens, 所以 reshape 回 dense
-        q_dense = q.reshape(b, lq, -1, q.size(-1))
-        k_dense = k.reshape(b, lk, -1, k.size(-1))
-        v_dense = v.reshape(b, lk, -1, v.size(-1))
-        x = _npu_flash_attention(
-            q_dense, k_dense, v_dense,
-            softmax_scale=softmax_scale,
-            causal=causal,
-        )
-        return x.reshape(b * lq, -1, x.size(-1)).unflatten(0, (b, lq)).type(out_dtype)
+        try:
+            q_dense = q.reshape(b, lq, -1, q.size(-1))
+            k_dense = k.reshape(b, lk, -1, k.size(-1))
+            v_dense = v.reshape(b, lk, -1, v.size(-1))
+            x = _npu_flash_attention(
+                q_dense, k_dense, v_dense,
+                softmax_scale=softmax_scale,
+                causal=causal,
+            )
+            return x.reshape(b * lq, -1, x.size(-1)).unflatten(0, (b, lq)).type(out_dtype)
+        except Exception as e:
+            _logger.warning("NPU FA failed (%s), falling back to SDPA", e)
+        # fall through to SDPA below
 
     # ── FA3 路径 ──
     if _ATTN_BACKEND == "fa3":
@@ -289,7 +308,17 @@ def flash_attention(
         ).unflatten(0, (b, lq))
         return x.type(out_dtype)
 
-    raise RuntimeError(f"Unknown attention backend: {_ATTN_BACKEND}")
+    # ── SDPA 回退 (所有加速路径均不可用或失败) ──
+    _logger.debug("Falling back to SDPA for flash_attention")
+    q_sdpa = q.to(dtype).reshape(b, lq, nq, c1).transpose(1, 2)
+    k_sdpa = k.to(dtype).reshape(b, lk, nk, c1).transpose(1, 2)
+    v_sdpa = v.to(dtype).reshape(b, lk, nk, c2).transpose(1, 2)
+    scale = softmax_scale or (c1 ** (-0.5))
+    out = F.scaled_dot_product_attention(
+        q_sdpa, k_sdpa, v_sdpa,
+        is_causal=causal, dropout_p=dropout_p, scale=scale,
+    )
+    return out.transpose(1, 2).contiguous().type(out_dtype)
 
 
 # ── 高层 attention 函数 (含回退逻辑) ────────────────
