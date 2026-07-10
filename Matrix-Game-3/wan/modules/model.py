@@ -240,10 +240,11 @@ def sinusoidal_embedding_1d(dim, position):
 @torch.amp.autocast('cuda', enabled=False)
 def rope_params(max_seq_len, dim, theta=10000):
     assert dim % 2 == 0
+    # 使用 float32 以生成 complex64 — Ascend NPU 不支持 complex128 算子
     freqs = torch.outer(
         torch.arange(max_seq_len),
         1.0 / torch.pow(theta,
-                        torch.arange(0, dim, 2).to(torch.float64).div(dim)))
+                        torch.arange(0, dim, 2).float().div(dim)))
     freqs = torch.polar(torch.ones_like(freqs), freqs)
     return freqs
 
