@@ -360,25 +360,28 @@ class MatrixGame3Pipeline:
         if self.rank != 0:
             return
 
-        from wan.modules.attention import FLASH_ATTN_2_AVAILABLE, FLASH_ATTN_3_AVAILABLE
+        from wan.npu_utils import get_attention_backend as _get_attn_backend
 
+        _BACKEND_DISPLAY = {
+            "fa3": "Flash Attention 3",
+            "fa2": "Flash Attention 2",
+            "mindiesd": "mindiesd (Ascend FA)",
+            "npu_fa": "NPU Fusion Attention",
+            "sdpa": "SDPA",
+        }
         requested_fa = getattr(args, 'fa_version', None)
-        actual_fa = "None (SDPA)"
-        if requested_fa == '0':
-            actual_fa = "Disabled (SDPA)"
-        elif (requested_fa == '3' or requested_fa is None) and FLASH_ATTN_3_AVAILABLE:
-            actual_fa = "Flash Attention 3"
-        elif FLASH_ATTN_2_AVAILABLE:
-            actual_fa = "Flash Attention 2"
-            if requested_fa == '3':
-                print(
-                    "⚠️  WARNING: Flash Attention 3 requested but not available. "
-                    "Falling back to Flash Attention 2.",
-                    flush=True,
-                )
+        backend = _get_attn_backend()
+        actual_fa = _BACKEND_DISPLAY.get(backend, backend)
+
+        if requested_fa == '3' and backend not in ("fa3",):
+            print(
+                f"⚠️  WARNING: Flash Attention 3 requested but not available. "
+                f"Using {actual_fa}.",
+                flush=True,
+            )
 
         print("🚀 Flash Attention Configuration:", flush=True)
-        print(f"  Requested: {requested_fa if requested_fa else 'Default (3)'}", flush=True)
+        print(f"  Requested: {requested_fa if requested_fa else 'Default'}", flush=True)
         print(f"  Actual:    {actual_fa}", flush=True)
 
 

@@ -374,9 +374,3 @@ def attention(
         out = out.transpose(1, 2).contiguous()
 
     return out
-
-
-# ── 兼容导出 (action_module.py 等依赖) ──────────────
-_detect_backends()
-FLASH_ATTN_3_AVAILABLE = _ATTN_BACKEND == "fa3"
-FLASH_ATTN_2_AVAILABLE = _ATTN_BACKEND in ("fa2", "fa3")  # FA2 在 FA3 可用时兼容

@@ -2,10 +2,12 @@ import torch
 import torch.nn as nn
 from typing import Any, List, Tuple, Optional, Union, Dict
 from einops import rearrange
-from .attention import FLASH_ATTN_3_AVAILABLE, FLASH_ATTN_2_AVAILABLE
-if FLASH_ATTN_3_AVAILABLE:
+from wan.npu_utils import get_attention_backend
+
+_attn_backend = get_attention_backend()
+if _attn_backend == "fa3":
     import flash_attn_interface as flash_attn_ops
-elif FLASH_ATTN_2_AVAILABLE:
+elif _attn_backend == "fa2":
     import flash_attn as flash_attn_ops
 else:
     flash_attn_ops = None
