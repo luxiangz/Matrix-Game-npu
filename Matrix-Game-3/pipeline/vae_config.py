@@ -45,7 +45,7 @@ def load_vae(device_id=0, args=None, metadata=None,):
     if lightvae_pruning_rate is None:
         lightvae_pruning_rate = 0.0
     vae_type = "wan2.2" if float(lightvae_pruning_rate) <= 0.0 else "mg_lightvae"
-    device = torch.device(f"cuda:{device_id}")
+    device = torch.device(f"cuda:{device_id}" if torch.cuda.is_available() else f"npu:{device_id}")
     # print(f"Loading VAE from {vae_path} with pruning rate {lightvae_pruning_rate}", flush=True)
     vae = Wan2_2_VAE(
         vae_pth=vae_path, 

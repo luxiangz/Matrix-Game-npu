@@ -13,6 +13,31 @@ from wan.distributed.util import init_distributed_group
 from pipeline.inference_interactive_pipeline import MatrixGame3Pipeline as MatrixGame3InteractivePipeline
 from pipeline.inference_pipeline import MatrixGame3Pipeline
 from utils.misc import set_seed
+
+
+def _resolve_backend_and_device():
+    """检测运行后端: NPU (hccl) / CUDA (nccl) / CPU."""
+    try:
+        import torch_npu
+        if torch_npu.npu.is_available():
+            return "hccl", "npu"
+    except (ImportError, AssertionError, RuntimeError):
+        pass
+    try:
+        if torch.cuda.is_available():
+            return "nccl", "cuda"
+    except (AssertionError, RuntimeError):
+        pass
+    return "gloo", "cpu"
+
+
+def _sync_device():
+    backend, _ = _resolve_backend_and_device()
+    if backend == "hccl":
+        import torch_npu
+        torch_npu.npu.synchronize()
+    else:
+        torch.cuda.synchronize()
 def _validate_args(args):
     if args.ulysses_size <= 1:
         if args.t5_fsdp or args.dit_fsdp:
@@ -99,9 +124,14 @@ def generate(args):
     set_seed(args.seed)
 
     if world_size > 1:
-        torch.cuda.set_device(local_rank)
+        _, device_type = _resolve_backend_and_device()
+        if device_type == "npu":
+            import torch_npu
+            torch_npu.npu.set_device(local_rank)
+        else:
+            torch.cuda.set_device(local_rank)
         dist.init_process_group(
-            backend="nccl",
+            backend=_resolve_backend_and_device()[0],
             init_method="env://",
             rank=rank,
             world_size=world_size)
@@ -180,7 +210,7 @@ def generate(args):
         use_base_model=args.use_base_model,
         args=args)
 
-    torch.cuda.synchronize()
+    _sync_device()
     if dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()

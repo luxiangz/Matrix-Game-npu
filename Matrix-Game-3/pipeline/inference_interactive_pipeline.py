@@ -110,7 +110,9 @@ class MatrixGame3Pipeline:
                 Convert DiT model parameters dtype to 'config.param_dtype'.
                 Only works without FSDP.
         """
-        self.device = torch.device(f"cuda:{device_id}")
+        if device_id is None:
+            device_id = 0
+        self.device = torch.device(f"cuda:{device_id}" if torch.cuda.is_available() else f"npu:{device_id}")
         self.config = config
         self.rank = rank
         self.t5_cpu = t5_cpu
