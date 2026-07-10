@@ -301,9 +301,18 @@ def rope_apply_with_indices(x, grid_sizes, freqs, t_indices=None):
             t_idx = t_idx.to(dtype=torch.long)
 
         if freqs[0].dim() == 3:
-            t_freqs = freqs[0][:, t_idx, :]  # [n, f, c_t]
-            h_freqs = freqs[1][:, :h, :]     # [n, h, c_h]
-            w_freqs = freqs[2][:, :w, :]     # [n, w, c_w]
+            # NPU 不支持 complex128 的 tensor index, 先转 real 再索引
+            _f0 = freqs[0]
+            _is_complex = _f0.is_complex()
+            if _is_complex:
+                _f0 = torch.view_as_real(_f0)
+            _f0_sel = _f0[:, t_idx, :]
+            if _is_complex:
+                t_freqs = torch.view_as_complex(_f0_sel)
+            else:
+                t_freqs = _f0_sel
+            h_freqs = freqs[1][:, :h, :]
+            w_freqs = freqs[2][:, :w, :]
 
             freqs_i = torch.cat([
                 t_freqs.permute(1, 0, 2).view(f, 1, 1, n, -1).expand(f, h, w, n, -1),
@@ -311,7 +320,14 @@ def rope_apply_with_indices(x, grid_sizes, freqs, t_indices=None):
                 w_freqs.permute(1, 0, 2).view(1, 1, w, n, -1).expand(f, h, w, n, -1),
             ], dim=-1).reshape(seq_len, n, -1)
         else:
-            t_freqs = freqs[0][t_idx]
+            # NPU 不支持 complex128 的 tensor index
+            _f0 = freqs[0]
+            if _f0.is_complex():
+                _f0 = torch.view_as_real(_f0)
+                _f0 = _f0[t_idx]
+                t_freqs = torch.view_as_complex(_f0)
+            else:
+                t_freqs = _f0[t_idx]
             h_freqs = freqs[1][:h]
             w_freqs = freqs[2][:w]
 
