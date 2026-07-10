@@ -321,29 +321,18 @@ def _detect_attention_backend() -> str:
     device_type = get_device_type()
 
     if device_type == "npu":
-        # Ascend: 优先 mindiesd (torch_npu 的融合注意力)
+        # Ascend: mindiesd (参照 vllm-omni)
         if importlib.util.find_spec("mindiesd"):
             try:
-                import mindiesd  # noqa: F401
+                from mindiesd import attention_forward  # noqa: F401
                 _ATTN_BACKEND = ATTN_BACKEND_MINDIESD
-                _logger.info("Attention backend: mindiesd (Ascend FA)")
+                _logger.info("Attention backend: mindiesd")
                 return _ATTN_BACKEND
             except ImportError:
                 pass
 
-        # 备选: torch_npu.npu_fusion_attention (需要 CANN 新版)
-        try:
-            import torch_npu
-            if hasattr(torch_npu, "npu_fusion_attention"):
-                _ATTN_BACKEND = ATTN_BACKEND_MINDIESD  # 功能等价, 归入同一类
-                _logger.info("Attention backend: torch_npu.npu_fusion_attention")
-                return _ATTN_BACKEND
-        except ImportError:
-            pass
-
-        # NPU 上无加速 attention → SDPA
         _ATTN_BACKEND = ATTN_BACKEND_SDPA
-        _logger.info("Attention backend: SDPA (no NPU FA available)")
+        _logger.info("Attention backend: SDPA (mindiesd not available)")
         return _ATTN_BACKEND
 
     elif device_type == "cuda":

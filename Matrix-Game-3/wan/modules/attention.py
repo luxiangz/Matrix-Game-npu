@@ -2,7 +2,7 @@
 wan/modules/attention.py — 跨平台 Flash Attention 封装
 
 支持后端 (按优先级):
-    NPU:  mindiesd / torch_npu.npu_fusion_attention → SDPA 回退
+    NPU:  mindiesd.attention_forward → SDPA 回退
     CUDA: Flash Attention 3 → Flash Attention 2 → SDPA 回退
     CPU:  SDPA
 
@@ -37,15 +37,14 @@ __all__ = [
 _FA3_AVAILABLE = False
 _FA2_AVAILABLE = False
 _MINDIESD_AVAILABLE = False
-_NPU_FA_AVAILABLE = False
-_ATTN_BACKEND: str = "sdpa"  # fa3 / fa2 / mindiesd / npu_fa / sdpa
+_ATTN_BACKEND: str = "sdpa"  # fa3 / fa2 / mindiesd / sdpa
 _USER_FA_VERSION = os.getenv("WAN_FA_VERSION", "")
 
 
 def _detect_backends() -> None:
     """一次性检测所有可用的 attention 后端 (结果缓存在模块全局变量)."""
     global _FA3_AVAILABLE, _FA2_AVAILABLE, _MINDIESD_AVAILABLE
-    global _NPU_FA_AVAILABLE, _ATTN_BACKEND
+    global _ATTN_BACKEND
 
     if _ATTN_BACKEND != "sdpa":
         return  # 已检测过
@@ -63,29 +62,16 @@ def _detect_backends() -> None:
         _npu_ok = False
 
     if _npu_ok:
-        # mindiesd: Ascend 官方 flash attention 库
+        # mindiesd: Ascend 官方 attention 库 (参照 vllm-omni)
         try:
             import importlib.util
             if importlib.util.find_spec("mindiesd"):
-                import mindiesd  # noqa: F401
+                from mindiesd import attention_forward  # noqa: F401
                 _MINDIESD_AVAILABLE = True
         except (ImportError, ModuleNotFoundError):
             pass
 
-        # torch_npu 内置融合注意力 (CANN 新版)
-        if not _MINDIESD_AVAILABLE:
-            try:
-                if hasattr(torch_npu, "npu_fusion_attention"):
-                    _NPU_FA_AVAILABLE = True
-            except Exception:
-                pass
-
-        if _MINDIESD_AVAILABLE:
-            _ATTN_BACKEND = "mindiesd"
-        elif _NPU_FA_AVAILABLE:
-            _ATTN_BACKEND = "npu_fa"
-        else:
-            _ATTN_BACKEND = "sdpa"
+        _ATTN_BACKEND = "mindiesd" if _MINDIESD_AVAILABLE else "sdpa"
         return
 
     # ── 检测 CUDA ──
@@ -129,11 +115,10 @@ def get_attention_backend() -> str:
 
 def reset_attention_backend() -> None:
     """重置 attention 后端检测缓存 — 在设置 WAN_FA_VERSION 后调用."""
-    global _ATTN_BACKEND, _MINDIESD_AVAILABLE, _NPU_FA_AVAILABLE
+    global _ATTN_BACKEND, _MINDIESD_AVAILABLE
     global _FA3_AVAILABLE, _FA2_AVAILABLE
     _ATTN_BACKEND = "sdpa"
     _MINDIESD_AVAILABLE = False
-    _NPU_FA_AVAILABLE = False
     _FA3_AVAILABLE = False
     _FA2_AVAILABLE = False
     _detect_backends()
@@ -148,9 +133,9 @@ def _npu_flash_attention(
     softmax_scale: float | None = None,
     causal: bool = False,
 ) -> torch.Tensor:
-    """Ascend NPU 上的 flash attention.
+    """Ascend NPU 上的 flash attention — 使用 mindiesd.attention_forward (参照 vllm-omni).
 
-    优先使用 mindiesd, 备选 torch_npu.npu_fusion_attention.
+    失败时自动回退 SDPA.
     """
     _detect_backends()
 
@@ -161,38 +146,27 @@ def _npu_flash_attention(
     if softmax_scale is None:
         softmax_scale = head_dim ** (-0.5)
 
-    # mindiesd 路径
+    # mindiesd 路径 — 参照 vllm-omni FlashAttentionImpl.forward_fa_npu()
     if _MINDIESD_AVAILABLE:
         try:
-            import mindiesd
-            return mindiesd.flash_attn_func(
-                q, k, v,
-                dropout_p=0.0,
-                softmax_scale=softmax_scale,
-                causal=causal,
-            )
-        except Exception as e:
-            _logger.warning("mindiesd failed (%s), falling back to SDPA", e)
-
-    # torch_npu.npu_fusion_attention 路径
-    if _NPU_FA_AVAILABLE:
-        try:
-            import torch_npu
-            q_npu = q.transpose(1, 2).contiguous()
-            k_npu = k.transpose(1, 2).contiguous()
-            v_npu = v.transpose(1, 2).contiguous()
-            out = torch_npu.npu_fusion_attention(
-                q_npu, k_npu, v_npu,
-                head_num=nq,
-                input_layout="BNSD",
-                scale=softmax_scale,
+            from mindiesd import attention_forward
+            # BNSD 布局: [B, N, S, D]
+            q_bnsd = q.transpose(1, 2).contiguous()
+            k_bnsd = k.transpose(1, 2).contiguous()
+            v_bnsd = v.transpose(1, 2).contiguous()
+            out = attention_forward(
+                q_bnsd, k_bnsd, v_bnsd,
+                attn_mask=None,
+                opt_mode="manual",
+                op_type="fused_attn_score",
+                layout="BNSD",
             )
             return out.transpose(1, 2).contiguous()
         except Exception as e:
-            _logger.warning("npu_fusion_attention failed (%s), falling back to SDPA", e)
+            _logger.warning("mindiesd.attention_forward failed (%s), falling back to SDPA", e)
 
-    # NPU FA 均不可用或失败
-    raise RuntimeError("All NPU FA backends failed or unavailable")
+    # NPU FA 不可用
+    raise RuntimeError("mindiesd not available")
 
 
 # ── 通用 flash_attention 函数 ───────────────────────
@@ -255,7 +229,7 @@ def flash_attention(
         q = q * q_scale
 
     # ── NPU 路径 ──
-    if _ATTN_BACKEND in ("mindiesd", "npu_fa"):
+    if _ATTN_BACKEND == "mindiesd":
         try:
             q_dense = q.reshape(b, lq, -1, q.size(-1))
             k_dense = k.reshape(b, lk, -1, k.size(-1))
