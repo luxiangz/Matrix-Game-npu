@@ -1348,5 +1348,7 @@ class Wan2_2_VAE:
             return out, feat_cache
             
         except Exception as e:
+            import traceback
             logging.error(f"Error in stream_decode: {e}")
+            traceback.print_exc()
             return None, feat_cache

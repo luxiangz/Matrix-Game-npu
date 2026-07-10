@@ -96,6 +96,9 @@ def get_plucker_embeddings(
     height: int,
     width: int,
 ):
+    # NPU matmul 不支持 float64, 统一转 float32
+    c2ws_mat = c2ws_mat.float()
+    Ks = Ks.float()
     n_frames = c2ws_mat.shape[0]
     grid_xy = create_meshgrid(n_frames, height, width, device=c2ws_mat.device, dtype=c2ws_mat.dtype) # [f, h*w, 2]
     fx, fy, cx, cy = Ks.chunk(4, dim=-1) 
