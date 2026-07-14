@@ -1,10 +1,12 @@
 import sys
 import os
+import time
 import argparse
 import logging
 import warnings
 import random
 import torch
+import torch_npu
 import torch.distributed as dist
 warnings.filterwarnings('ignore')
 from PIL import Image
@@ -84,6 +86,9 @@ def _parse_args():
     parser.add_argument('--fa_version', type=str, default=None, choices=['0', '2', '3'], help='Flash Attention version (2 or 3). Set to 0 to disable.')
     parser.add_argument("--interactive", action="store_true", help="Enable interactive inference.")
     parser.add_argument("--use_base_model", action="store_true", help="Enable base model inference.")
+
+    parser.add_argument("--prof", action="store_true", default=False, help="Whether to enable torch_npu profiler.")
+
     args = parser.parse_args()
     # 将 fa_version 同步到环境变量, attention.py 在 import 时已读取
     if args.fa_version is not None:
@@ -178,8 +183,48 @@ def generate(args):
             fa_version=args.fa_version,
             use_base_model=args.use_base_model,
         )
+    if args.prof:
+        logging.info("warm up ...")
+        pipeline.generate(
+            args.prompt,
+            pil_image,
+            max_area=MAX_AREA_CONFIGS[args.size],
+            shift=args.sample_shift,
+            num_inference_steps=2,
+            guide_scale=args.sample_guide_scale,
+            seed=args.seed,
+            use_base_model=args.use_base_model,
+            args=args)
+        prof_res_path = args.output_dir
+        exp_cfg = torch_npu.profiler._ExperimentalConfig(
+            export_type=[
+                torch_npu.profiler.ExportType.Text
+                ],
+            aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+            profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
+            l2_cache=False,
+            op_attr=False,
+            data_simplification=False,
+        )
+        prof = torch_npu.profiler.profile(
+            activities=[
+                torch_npu.profiler.ProfilerActivity.CPU,
+                torch_npu.profiler.ProfilerActivity.NPU
+                ],
+            on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(prof_res_path),
+            schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=1, repeat=1, skip_first=0),
+            experimental_config=exp_cfg,
+            with_stack=True,
+            with_modules=True,
+            with_flops=False,
+            record_shapes=True,
+            profile_memory=False,
+        )
+        prof.start()
 
     logging.info("Generating video ...")
+    torch.npu.synchronize()
+    start = time.perf_counter()
     pipeline.generate(
         args.prompt,
         pil_image,
@@ -195,8 +240,12 @@ def generate(args):
     if dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()
-
-    logging.info("Finished.")
+    if args.prof:
+        prof.step()
+        prof.stop()
+    torch.npu.synchronize()
+    end = time.perf_counter()
+    logging.info(f"Finished. Generating video Time: {(end - start)} s")
 
 
 if __name__ == "__main__":
