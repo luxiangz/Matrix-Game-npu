@@ -802,7 +802,7 @@ class MatrixGame3Pipeline:
                             mouse_scale=0.2,
                             default_frame_res=(height, width),
                         )
-                        print(f"Saved concatenated video with {len(all_videos_list)} segments")
+                        print(f"Saved concatenated video with {len(all_videos_list)} segments. Saved to {self.output_dir}/{save_name}.mp4")
                         video = torch.concat(all_videos_list, dim=2)[0]
                     else:
                         video = None
@@ -812,4 +812,3 @@ class MatrixGame3Pipeline:
             if dist.is_initialized():
                 dist.barrier()
                 dist.destroy_process_group()
-            exit()
