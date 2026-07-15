@@ -581,8 +581,8 @@ class MatrixGame3Pipeline:
                 else:                   
                     if self.rank == 0:
                         mem_end = ((current_start_frame_idx - 1) // 4 * 4 + 1) if current_start_frame_idx > 1 else 1
-                        _skip = max(1, 32 // (num_mem_frames - 1)) if num_mem_frames > 1 else 1
-                        _lookback = _skip * (num_mem_frames - 1) + 2
+                        _skip = max(1, 32 // (num_mem_frames - 1)) if num_mem_frames > 1 else 32
+                        _lookback = _skip * max(num_mem_frames - 1, 1) + 2
                         selected_index_base = [current_end_frame_idx - o for o in range(1, _lookback, _skip)]
                         selected_index = select_memory_idx_fov(
                             extrinsics_all,
@@ -595,8 +595,8 @@ class MatrixGame3Pipeline:
                         selected_index_base = [current_end_frame_idx - o for o in range(1, _lookback, _skip)]
                     else:
                         selected_index = [0] * num_mem_frames
-                        _skip = max(1, 32 // (num_mem_frames - 1)) if num_mem_frames > 1 else 1
-                        _lookback = _skip * (num_mem_frames - 1) + 2
+                        _skip = max(1, 32 // (num_mem_frames - 1)) if num_mem_frames > 1 else 32
+                        _lookback = _skip * max(num_mem_frames - 1, 1) + 2
                         selected_index_base = [current_end_frame_idx - o for o in range(1, _lookback, _skip)]
 
                     if dist.is_initialized():
