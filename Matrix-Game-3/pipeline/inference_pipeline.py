@@ -18,6 +18,7 @@ from einops import rearrange
 from functools import partial
 from wan.distributed.fsdp import shard_model
 from wan.distributed.sequence_parallel import sp_attn_forward, sp_dit_forward
+from wan.npu_utils import get_device as _get_npu_device
 from wan.distributed.util import get_world_size
 from wan.modules import WanModel
 from wan.modules.t5 import T5EncoderModel
@@ -72,7 +73,7 @@ class MatrixGame3Pipeline:
                 Convert DiT model parameters dtype to 'config.param_dtype'.
                 Only works without FSDP.
         """
-        self.device = torch.device(f"cuda:{device_id}")
+        self.device = _get_npu_device(device_id)
         self.config = config
         self.rank = rank
         self.t5_cpu = t5_cpu
@@ -257,6 +258,7 @@ class MatrixGame3Pipeline:
                         "num_iterations": args.num_iterations if hasattr(args, 'num_iterations') else 12,
                         "compile_vae": getattr(args, 'compile_vae', False),
                         "async_vae_warmup_iters": getattr(args, 'async_vae_warmup_iters', 0),
+                        "no_overlay": getattr(args, 'no_overlay', False),
                     }
                     meta.update(self.vae_config_dict)
                     (
@@ -318,25 +320,28 @@ class MatrixGame3Pipeline:
         if self.rank != 0:
             return
 
-        from wan.modules.attention import FLASH_ATTN_2_AVAILABLE, FLASH_ATTN_3_AVAILABLE
+        from wan.npu_utils import get_attention_backend as _get_attn_backend
 
+        _BACKEND_DISPLAY = {
+            "fa3": "Flash Attention 3",
+            "fa2": "Flash Attention 2",
+            "mindiesd": "mindiesd (Ascend FA)",
+            "npu_fa": "NPU Fusion Attention",
+            "sdpa": "SDPA",
+        }
         requested_fa = getattr(args, 'fa_version', None)
-        actual_fa = "None (SDPA)"
-        if requested_fa == '0':
-            actual_fa = "Disabled (SDPA)"
-        elif (requested_fa == '3' or requested_fa is None) and FLASH_ATTN_3_AVAILABLE:
-            actual_fa = "Flash Attention 3"
-        elif FLASH_ATTN_2_AVAILABLE:
-            actual_fa = "Flash Attention 2"
-            if requested_fa == '3':
-                print(
-                    "⚠️  WARNING: Flash Attention 3 requested but not available. "
-                    "Falling back to Flash Attention 2.",
-                    flush=True,
-                )
+        backend = _get_attn_backend()
+        actual_fa = _BACKEND_DISPLAY.get(backend, backend)
+
+        if requested_fa == '3' and backend not in ("fa3",):
+            print(
+                f"⚠️  WARNING: Flash Attention 3 requested but not available. "
+                f"Using {actual_fa}.",
+                flush=True,
+            )
 
         print("🚀 Flash Attention Configuration:", flush=True)
-        print(f"  Requested: {requested_fa if requested_fa else 'Default (3)'}", flush=True)
+        print(f"  Requested: {requested_fa if requested_fa else 'Default'}", flush=True)
         print(f"  Actual:    {actual_fa}", flush=True)
 
 
@@ -425,11 +430,16 @@ class MatrixGame3Pipeline:
             max_seq_len = int(math.ceil(max_seq_len / self.sp_size)) * self.sp_size
 
         with torch.no_grad():
+            # === FPS timing ===
+            timing_records = []
+            total_start_time = time.time()
+
             total_frames = 0
             all_latents_list = []
             all_videos_list = []
             
             for clip_idx in range(num_iterations):
+                iter_start = time.time()
                 first_clip = (clip_idx == 0)
                 if self.rank == 0:
                     print(f" Iteration {clip_idx + 1}/{num_iterations}", flush=True)
@@ -568,13 +578,67 @@ class MatrixGame3Pipeline:
                     "predict_latent_idx": (latent_start_idx, latent_end_idx),
                 }
                     
-                for _, t in enumerate(tqdm(timesteps, disable=(self.rank != 0))):
+                t_diffusion_start = time.time()
+                do_profile = (self.rank == 0 and clip_idx <= 1 and getattr(args, 'profile', False))
+                on_npu = hasattr(torch, 'npu') and torch.npu.is_available()
+
+                _profiler = None
+                _trace_path = None
+                if do_profile:
+                    label = "1st(57f)" if first_clip else f"iter{clip_idx}(40f)"
+                    trace_name = getattr(args, 'profile_trace', None) or f"{save_name}_profile"
+                    _trace_path = f"{self.output_dir}/{trace_name}_iter{clip_idx:02d}.json"
+                    if on_npu:
+                        try:
+                            import torch_npu
+                            experimental_config = torch_npu.profiler._ExperimentalConfig(
+                                export_type=torch_npu.profiler.ExportType.Text,
+                                profiler_level=torch_npu.profiler.ProfilerLevel.Level0,
+                                aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+                                l2_cache=False,
+                                op_attr=False,
+                                data_simplification=True,
+                                gc_detect_threshold=None,
+                            )
+                            # with_modules needs CPU+NPU activities
+                            activities = [torch_npu.profiler.ProfilerActivity.NPU]
+                            with_modules = getattr(args, 'profile_stack', False)
+                            if with_modules:
+                                activities.append(torch_npu.profiler.ProfilerActivity.CPU)
+                            try:
+                                _profiler = torch_npu.profiler.profile(
+                                    activities=activities,
+                                    record_shapes=True, profile_memory=True,
+                                    with_modules=with_modules,
+                                    experimental_config=experimental_config,
+                                )
+                            except TypeError:
+                                _profiler = torch_npu.profiler.profile(
+                                    activities=activities,
+                                    record_shapes=True, profile_memory=True,
+                                    experimental_config=experimental_config,
+                                )
+                        except Exception:
+                            on_npu = False
+                    if not on_npu or _profiler is None:
+                        _profiler = torch.profiler.profile(
+                            activities=[torch.profiler.ProfilerActivity.CPU],
+                            record_shapes=True, profile_memory=True,
+                            with_stack=getattr(args, 'profile_stack', False))
+
+                for step_idx, t in enumerate(tqdm(timesteps, disable=(self.rank != 0))):
+                    # NPU profiler: warmup step 0, profile step 1 only (avoids 1st-step
+                    # kernel compilation skew + keeps overhead minimal)
+                    _profile_this_step = (do_profile and _profiler and step_idx == 1)
+                    if _profile_this_step:
+                        _profiler.start()
+
                     latent_model_input = latents
 
                     timestep = latents.new_full((latents.shape[2], latents.shape[3] * latents.shape[4] // 4), t)
                     timestep[:img_cond.shape[2]].zero_()
                     timestep = timestep.flatten().unsqueeze(0)
-                   
+
                     model_kwargs = {
                         "x": latent_model_input,
                         "t": timestep,
@@ -596,13 +660,27 @@ class MatrixGame3Pipeline:
                         noise_pred = self.model(**model_kwargs)
 
                     if args is not None and getattr(args, 'use_int8', False) and getattr(args, 'verify_quant', False):
-                        if _ == 0 and self.rank == 0:
-                            print(f"\n[Verification] Step {_}: noise_pred stats: mean={noise_pred.mean().item():.6f}, std={noise_pred.std().item():.6f}", flush=True)
+                        if step_idx == 0 and self.rank == 0:
+                            print(f"\n[Verification] Step {step_idx}: noise_pred stats: mean={noise_pred.mean().item():.6f}, std={noise_pred.std().item():.6f}", flush=True)
 
                     latents = test_scheduler.step(
                         noise_pred, t, latents, return_dict=False)[0]
                     latents = torch.cat([img_cond, latents[:,:,img_cond.shape[2]:]], dim=2)
-                                 
+
+                    if _profile_this_step:
+                        _profiler.step()
+                        _profiler.stop()
+
+                if do_profile and _profiler and _trace_path:
+                    print(f"\n[Profiler] Recording {label} step1 → {_trace_path}", flush=True)
+                    _profiler.export_chrome_trace(_trace_path)
+                    print(f"[Profiler] Chrome trace → {_trace_path}", flush=True)
+                    try:
+                        print(_profiler.key_averages().table(sort_by="npu_time_total" if on_npu else "cuda_time_total", row_limit=20))
+                    except Exception:
+                        pass
+
+                t_diffusion_end = time.time()
                 img_cond = latents[:, :, -4:]
                 denoised_pred = latents if first_clip else latents[:, :, -10:]
 
@@ -642,18 +720,28 @@ class MatrixGame3Pipeline:
                         do_compile = getattr(args, "compile_vae", False) and clip_idx >= 1
                         vae_segment_size = int(os.environ.get("WAN_VAE_SEGMENT_SIZE", "4"))
                         video, vae_cache = self.vae.stream_decode(
-                            denoised_pred.to(dtype=self.vae.dtype), 
-                            vae_cache, 
-                            first_chunk=first_clip, 
+                            denoised_pred.to(dtype=self.vae.dtype),
+                            vae_cache,
+                            first_chunk=first_clip,
                             segment_size=vae_segment_size,
                             profiler=vae_profiler,
                             compile_decoder=do_compile
                         )
                         all_videos_list.append(video.cpu())
-                        
+
                 all_latents_list.append(denoised_pred)
                 current_frames = 57 if first_clip else 40
                 total_frames += current_frames
+
+                t_iter_end = time.time()
+                if self.rank == 0:
+                    timing_records.append({
+                        'clip_idx': clip_idx,
+                        'first_clip': first_clip,
+                        'num_new_frames': current_frames,
+                        'diffusion_time': t_diffusion_end - t_diffusion_start,
+                        'total_iter_time': t_iter_end - iter_start,
+                    })
 
             def denormalize_video(video):
                 return np.ascontiguousarray(
@@ -698,6 +786,7 @@ class MatrixGame3Pipeline:
                         mouse_icon,
                         mouse_scale=0.2,
                         default_frame_res=(height, width),
+                        no_overlay=getattr(args, 'no_overlay', False),
                     )
                     print(f"Saved concatenated video with {len(all_videos_list)} segments")
                     video = torch.concat(all_videos_list, dim=2)[0]
@@ -705,6 +794,37 @@ class MatrixGame3Pipeline:
                     video = None
             else:
                 video = None
+
+            if self.rank == 0 and timing_records:
+                total_time = time.time() - total_start_time
+                total_frames_all = sum(r['num_new_frames'] for r in timing_records)
+                print("\n" + "=" * 65)
+                print("  FPS Benchmark Report")
+                print("=" * 65)
+                print(f"  Total frames:      {total_frames_all}")
+                print(f"  Total time:        {total_time:.2f}s")
+                print(f"  Overall FPS:       {total_frames_all / total_time:.1f}")
+                print("-" * 65)
+                steady_records = timing_records[1:] if len(timing_records) > 1 else timing_records
+                if steady_records:
+                    steady_frames = sum(r['num_new_frames'] for r in steady_records)
+                    steady_time = sum(r['total_iter_time'] for r in steady_records)
+                    steady_diff = sum(r['diffusion_time'] for r in steady_records)
+                    print(f"  Steady-state (excl. 1st clip):")
+                    print(f"    Frames:          {steady_frames}")
+                    print(f"    Total time:      {steady_time:.2f}s")
+                    print(f"    Diffusion time:  {steady_diff:.2f}s")
+                    print(f"    VAE time:        {steady_time - steady_diff:.2f}s")
+                    print(f"    FPS:             {steady_frames / steady_time:.1f}")
+                print("-" * 65)
+                print(f"  Per-iteration breakdown:")
+                for r in timing_records:
+                    label = "1st(57f)" if r['first_clip'] else f"iter{r['clip_idx']}(40f)"
+                    vae_t = r['total_iter_time'] - r['diffusion_time']
+                    print(f"    {label}:  total={r['total_iter_time']:.2f}s  "
+                          f"diffusion={r['diffusion_time']:.2f}s  "
+                          f"vae={vae_t:.2f}s")
+                print("=" * 65 + "\n", flush=True)
 
             if dist.is_initialized():
                 dist.barrier()

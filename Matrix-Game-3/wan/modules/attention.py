@@ -1,11 +1,9 @@
+import math
 import torch
 try:
     import flash_attn_interface
     import os
-    # Centralized control for Flash Attention version
-    # WAN_FA_VERSION: "2" or "3". Defaults to "3" if available.
     WAN_FA_VERSION = os.getenv("WAN_FA_VERSION", "3")
-    
     if WAN_FA_VERSION == "3":
         FLASH_ATTN_3_AVAILABLE = True
     else:
@@ -19,11 +17,31 @@ try:
 except ModuleNotFoundError:
     FLASH_ATTN_2_AVAILABLE = False
 
+# ── NPU mindiesd 检测 (参照 vllm-omni FlashAttentionImpl.forward_fa_npu) ──
+_MINDIESD_AVAILABLE = False
+try:
+    from mindiesd import attention_forward as _mindiesd_attention_forward
+    _MINDIESD_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    pass
+
+# ── NPU npu_fusion_attention 检测 (Ascend 原生 FA) ──
+_NPU_FA_AVAILABLE = False
+try:
+    import torch_npu
+    if hasattr(torch_npu, 'npu_fusion_attention'):
+        _npu_fusion_attention = torch_npu.npu_fusion_attention
+        _NPU_FA_AVAILABLE = True
+except (ImportError, ModuleNotFoundError, AssertionError):
+    pass
+
 import warnings
 
 __all__ = [
     'flash_attention',
     'attention',
+    'FLASH_ATTN_3_AVAILABLE',
+    'FLASH_ATTN_2_AVAILABLE',
 ]
 
 
@@ -46,21 +64,82 @@ def flash_attention(
     q:              [B, Lq, Nq, C1].
     k:              [B, Lk, Nk, C1].
     v:              [B, Lk, Nk, C2]. Nq must be divisible by Nk.
-    q_lens:         [B].
-    k_lens:         [B].
-    dropout_p:      float. Dropout probability.
-    softmax_scale:  float. The scaling of QK^T before applying softmax.
-    causal:         bool. Whether to apply causal attention mask.
-    window_size:    (left right). If not (-1, -1), apply sliding window local attention.
-    deterministic:  bool. If True, slightly slower and uses more memory.
-    dtype:          torch.dtype. Apply when dtype of q/k/v is not float16/bfloat16.
+    ...
     """
     half_dtypes = (torch.float16, torch.bfloat16)
     assert dtype in half_dtypes
-    assert q.device.type == 'cuda' and q.size(-1) <= 256
+    assert q.device.type in ('cuda', 'npu') and q.size(-1) <= 256
 
-    # params
     b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
+
+    # ── 无 FA 可用时，直接用 SDPA (在 varlen 转换前处理, 避免 shape 问题) ──
+    _fa_available = FLASH_ATTN_3_AVAILABLE or FLASH_ATTN_2_AVAILABLE  # NVIDIA only
+    _fa_disabled = (version == '0')
+
+    if _fa_disabled or not _fa_available:
+        # NPU native FA path (torch_npu.npu_fusion_attention, dense → BSND)
+        if _NPU_FA_AVAILABLE and not _fa_disabled:
+            try:
+                head_num = q.size(2)
+                scale = softmax_scale or (1.0 / math.sqrt(q.size(-1)))
+                q_bsnd = q.transpose(1, 2).contiguous()
+                k_bsnd = k.transpose(1, 2).contiguous()
+                v_bsnd = v.transpose(1, 2).contiguous()
+                x = _npu_fusion_attention(
+                    q_bsnd, k_bsnd, v_bsnd,
+                    head_num,
+                    "BSND",
+                    scale=scale,
+                    keep_prob=1.0,
+                )[0]
+                return x.transpose(1, 2).contiguous().type(out_dtype)
+            except Exception:
+                pass  # npu_fusion_attention failed, fall through
+
+        # NPU mindiesd path (dense → BNSD → mindiesd.attention_forward)
+        if _MINDIESD_AVAILABLE and not _fa_disabled:
+            try:
+                q_bnsd = q.transpose(1, 2).contiguous()
+                k_bnsd = k.transpose(1, 2).contiguous()
+                v_bnsd = v.transpose(1, 2).contiguous()
+                x = _mindiesd_attention_forward(
+                    q_bnsd, k_bnsd, v_bnsd,
+                    attn_mask=None,
+                    opt_mode="manual",
+                    op_type="fused_attn_score",
+                    layout="BNSD",
+                )
+                return x.transpose(1, 2).contiguous().type(out_dtype)
+            except Exception:
+                pass  # mindiesd failed, fall through to SDPA
+
+        # SDPA fallback — 直接在原始 dense 输入上运行
+        if q_lens is not None or k_lens is not None:
+            warnings.warn(
+                'Padding mask is disabled when using SDPA. '
+                'It can have a significant impact on performance.'
+            )
+
+        if q.dim() == 3:
+            q_sdpa = q.unsqueeze(0).transpose(1, 2).to(dtype)
+            k_sdpa = k.unsqueeze(0).transpose(1, 2).to(dtype)
+            v_sdpa = v.unsqueeze(0).transpose(1, 2).to(dtype)
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q_sdpa, k_sdpa, v_sdpa,
+                is_causal=causal, dropout_p=dropout_p)
+            out = out.transpose(1, 2).squeeze(0).contiguous()
+        else:
+            q_sdpa = q.transpose(1, 2).to(dtype)
+            k_sdpa = k.transpose(1, 2).to(dtype)
+            v_sdpa = v.transpose(1, 2).to(dtype)
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q_sdpa, k_sdpa, v_sdpa,
+                is_causal=causal, dropout_p=dropout_p)
+            out = out.transpose(1, 2).contiguous()
+
+        return out.type(out_dtype)
+
+    # ── 以下是原始 FA3/FA2 路径 (varlen 格式), 完全不变 ──
 
     def half(x):
         return x if x.dtype in half_dtypes else x.to(dtype)
@@ -133,6 +212,7 @@ def flash_attention(
 
 _WARNED_FA_DISABLED = False
 
+
 def attention(
     q,
     k,
@@ -175,17 +255,17 @@ def attention(
             warnings.warn(
                 'Padding mask is disabled when using scaled_dot_product_attention. It can have a significant impact on performance.'
             )
-        
+
         attn_mask = None
-        
+
         if q.dim() == 3:
             q = q.unsqueeze(0).transpose(1, 2).to(dtype)
             k = k.unsqueeze(0).transpose(1, 2).to(dtype)
             v = v.unsqueeze(0).transpose(1, 2).to(dtype)
-            
+
             out = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p)
-            
+
             out = out.transpose(1, 2).squeeze(0).contiguous()
         else:
             q = q.transpose(1, 2).to(dtype)
@@ -196,5 +276,5 @@ def attention(
                 q, k, v, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p)
 
             out = out.transpose(1, 2).contiguous()
-            
+
         return out

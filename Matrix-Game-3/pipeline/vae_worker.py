@@ -120,6 +120,7 @@ def _save_final_video(all_videos, actual_watch_dir, metadata, mouse_condition, k
         "assets/images/mouse.png",
         mouse_scale=0.2,
         default_frame_res=(metadata["height"], metadata["width"]),
+        no_overlay=metadata.get("no_overlay", False),
     )
 
 

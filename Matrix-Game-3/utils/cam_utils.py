@@ -62,10 +62,11 @@ def SE3_inverse(T: torch.Tensor) -> torch.Tensor:
 
 
 def compute_relative_poses(
-    c2ws_mat: torch.Tensor, 
-    framewise: bool = False, 
-    normalize_trans: bool = True, 
+    c2ws_mat: torch.Tensor,
+    framewise: bool = False,
+    normalize_trans: bool = True,
 ) -> torch.Tensor:
+    c2ws_mat = c2ws_mat.float()  # NPU matmul 不支持 float64
     ref_w2cs = SE3_inverse(c2ws_mat[0:1])
     relative_poses = torch.matmul(ref_w2cs, c2ws_mat)
     relative_poses[0] = torch.eye(4, device=c2ws_mat.device, dtype=c2ws_mat.dtype)
@@ -81,7 +82,9 @@ def compute_relative_poses(
 
 
 @torch.no_grad()
-def create_meshgrid(n_frames: int, height: int, width: int, bias: float = 0.5, device='cuda', dtype=torch.float32) -> torch.Tensor:
+def create_meshgrid(n_frames: int, height: int, width: int, bias: float = 0.5, device=None, dtype=torch.float32) -> torch.Tensor:
+    if device is None:
+        device = torch.device("npu" if (hasattr(torch, 'npu') and torch.npu.is_available()) else "cuda" if torch.cuda.is_available() else "cpu")
     x_range = torch.arange(width, device=device, dtype=dtype)
     y_range = torch.arange(height, device=device, dtype=dtype)
     grid_y, grid_x = torch.meshgrid(y_range, x_range, indexing='ij')
@@ -96,6 +99,9 @@ def get_plucker_embeddings(
     height: int,
     width: int,
 ):
+    # NPU matmul 不支持 float64, 统一转 float32
+    c2ws_mat = c2ws_mat.float()
+    Ks = Ks.float()
     n_frames = c2ws_mat.shape[0]
     grid_xy = create_meshgrid(n_frames, height, width, device=c2ws_mat.device, dtype=c2ws_mat.dtype) # [f, h*w, 2]
     fx, fy, cx, cy = Ks.chunk(4, dim=-1) 
@@ -297,7 +303,7 @@ def is_inside_fov_3d_direct(points, position, rotation_matrix, fov_half_h, fov_h
 
 def select_memory_idx_fov(extrinsics_all, current_start_frame_idx, selected_index_base, return_confidence=False, use_gpu=False):
     if use_gpu:
-        device = extrinsics_all.device if isinstance(extrinsics_all, torch.Tensor) else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = extrinsics_all.device if isinstance(extrinsics_all, torch.Tensor) else torch.device("npu" if (hasattr(torch, 'npu') and torch.npu.is_available()) else "cuda" if torch.cuda.is_available() else "cpu")
         
         if isinstance(extrinsics_all, np.ndarray):
             extrinsics_tensor = torch.from_numpy(extrinsics_all).to(device).float()
@@ -585,7 +591,7 @@ def get_extrinsics(video_rotation, video_position):
         [1, 0, 0],  # Y_cam -> Z_world
         [0, -1, 0]   # Z_cam -> X_world
     ])
-    Extrinsics = torch.from_numpy(np.array(Extrinsics_vid))
+    Extrinsics = torch.from_numpy(np.array(Extrinsics_vid)).float()
     Extrinsics[:, :3, :3] = Extrinsics[:, :3, :3] @ R_init
     Extrinsics[:,:3,3] = Extrinsics[:,:3,3]*0.01 
     return Extrinsics

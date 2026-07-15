@@ -7,11 +7,11 @@
 #
 # Modifications Copyright (c) 2026 SkyworkAI and contributors.
 import torch
-import torch.cuda.amp as amp
 import torch.nn.functional as torch_F
 from einops import rearrange
 
 from ..modules.model import sinusoidal_embedding_1d
+from ..npu_utils import get_device_type
 from .ulysses import distributed_attention
 from .util import gather_forward, get_rank, get_world_size
 
@@ -19,17 +19,21 @@ from .util import gather_forward, get_rank, get_world_size
 def pad_freqs(original_tensor, target_len):
     seq_len, s1, s2 = original_tensor.shape
     pad_size = target_len - seq_len
-    padding_tensor = torch.ones(
-        pad_size,
-        s1,
-        s2,
-        dtype=original_tensor.dtype,
-        device=original_tensor.device)
-    padded_tensor = torch.cat([original_tensor, padding_tensor], dim=0)
-    return padded_tensor
+    # NPU does not support torch.ones with complex64 — convert to real first.
+    if original_tensor.is_complex():
+        real = torch.view_as_real(original_tensor)
+        pad_real = torch.ones(pad_size, s1, s2, 2,
+                              dtype=real.dtype, device=real.device)
+        padded_real = torch.cat([real, pad_real], dim=0)
+        return torch.view_as_complex(padded_real)
+    else:
+        padding_tensor = torch.ones(pad_size, s1, s2,
+                                    dtype=original_tensor.dtype,
+                                    device=original_tensor.device)
+        return torch.cat([original_tensor, padding_tensor], dim=0)
 
 
-@torch.amp.autocast('cuda', enabled=False)
+@torch.amp.autocast(get_device_type(), enabled=False)
 def rope_apply(x, grid_sizes, freqs):
     """
     x:          [B, L, N, C].
@@ -65,7 +69,7 @@ def rope_apply(x, grid_sizes, freqs):
     return torch.stack(output).float()
 
 
-@torch.amp.autocast('cuda', enabled=False)
+@torch.amp.autocast(get_device_type(), enabled=False)
 def rope_apply_mem_sp(x, grid_sizes, freqs, memory_length, memory_latent_idx, predict_latent_idx):
     """
     Apply RoPE to input tensor using precomputed freqs and optional time indices, with SP support.
@@ -116,7 +120,9 @@ def rope_apply_mem_sp(x, grid_sizes, freqs, memory_length, memory_latent_idx, pr
             freqs_pred = _get_freqs_chunk(grid_sizes_pred, freqs, pred_indices)
             freqs_i_list.append(freqs_pred)
             
-        freqs_i = torch.cat(freqs_i_list, dim=0) 
+        # NPU aclnnCat on complex64 → AI CPU. Work in real space.
+        freqs_i = torch.view_as_complex(
+            torch.cat([torch.view_as_real(f) for f in freqs_i_list], dim=0))
         
         sp_size = get_world_size()
         sp_rank = get_rank()
@@ -138,34 +144,43 @@ def rope_apply_mem_sp(x, grid_sizes, freqs, memory_length, memory_latent_idx, pr
 def _get_freqs_chunk(grid_sizes, freqs, t_indices):
     f, h, w = grid_sizes
     seq_len = f * h * w
-    
+
     if torch.is_tensor(t_indices):
         t_idx = t_indices
     else:
         t_idx = torch.tensor(t_indices, device=freqs[0].device)
     t_idx = t_idx.to(dtype=torch.long)
-    
+
+    # NPU does not support indexing on complex64 tensors.
+    # Convert to real representation, index, then convert back.
+    _freq0 = torch.view_as_real(freqs[0])  # [n, f, c_t, 2]
+    _freq1 = torch.view_as_real(freqs[1])  # [n, h, c_h, 2]
+    _freq2 = torch.view_as_real(freqs[2])  # [n, w, c_w, 2]
+
     if freqs[0].dim() == 3:
         n = freqs[0].size(0)
-        t_freqs = freqs[0][:, t_idx, :]  # [n, f, c_t]
-        h_freqs = freqs[1][:, :h, :]     # [n, h, c_h]
-        w_freqs = freqs[2][:, :w, :]     # [n, w, c_w]
+        # NPU aclnnCat falls back to AI CPU on complex64 → work in real space.
+        t_real = _freq0[:, t_idx, :, :]   # [n, f, c_t, 2]
+        h_real = _freq1[:, :h, :, :]      # [n, h, c_h, 2]
+        w_real = _freq2[:, :w, :, :]      # [n, w, c_w, 2]
 
-        freqs_i = torch.cat([
-            t_freqs.permute(1, 0, 2).view(f, 1, 1, n, -1).expand(f, h, w, n, -1),
-            h_freqs.permute(1, 0, 2).view(1, h, 1, n, -1).expand(f, h, w, n, -1),
-            w_freqs.permute(1, 0, 2).view(1, 1, w, n, -1).expand(f, h, w, n, -1),
-        ], dim=-1).reshape(seq_len, n, -1)
+        t_real = t_real.permute(1, 0, 2, 3).reshape(f, 1, 1, n, -1, 2).expand(f, h, w, n, -1, 2)
+        h_real = h_real.permute(1, 0, 2, 3).reshape(1, h, 1, n, -1, 2).expand(f, h, w, n, -1, 2)
+        w_real = w_real.permute(1, 0, 2, 3).reshape(1, 1, w, n, -1, 2).expand(f, h, w, n, -1, 2)
+
+        freqs_i = torch.view_as_complex(
+            torch.cat([t_real, h_real, w_real], dim=-2).reshape(seq_len, n, -1, 2))
     else:
-        t_freqs = freqs[0][t_idx]
-        h_freqs = freqs[1][:h]
-        w_freqs = freqs[2][:w]
+        t_real = _freq0[t_idx]   # [f, c_t, 2]
+        h_real = _freq1[:h]      # [h, c_h, 2]
+        w_real = _freq2[:w]      # [w, c_w, 2]
 
-        freqs_i = torch.cat([
-            t_freqs.view(f, 1, 1, -1).expand(f, h, w, -1),
-            h_freqs.view(1, h, 1, -1).expand(f, h, w, -1),
-            w_freqs.view(1, 1, w, -1).expand(f, h, w, -1),
-        ], dim=-1).reshape(seq_len, 1, -1)
+        t_real = t_real.reshape(f, 1, 1, -1, 2).expand(f, h, w, -1, 2)
+        h_real = h_real.reshape(1, h, 1, -1, 2).expand(f, h, w, -1, 2)
+        w_real = w_real.reshape(1, 1, w, -1, 2).expand(f, h, w, -1, 2)
+
+        freqs_i = torch.view_as_complex(
+            torch.cat([t_real, h_real, w_real], dim=-2).reshape(seq_len, 1, -1, 2))
         
     return freqs_i
 
@@ -228,7 +243,7 @@ def sp_dit_forward(
             t, t.new_zeros(t.size(0), seq_len - t.size(1))
         ], dim=1)
 
-    with torch.amp.autocast('cuda', dtype=torch.float32):
+    with torch.amp.autocast(get_device_type(), dtype=torch.float32):
         bt = t.size(0)
         t = t.flatten()
         e = self.time_embedding(

@@ -11,6 +11,7 @@ from diffusers.models.modeling_utils import ModelMixin
 from einops import rearrange
 from .attention import flash_attention
 from .action_module import ActionModule
+from ..npu_utils import get_device_type
 
 # --- Int8 Quantization Support ---
 _CACHED_TRITON_KERNELS = None
@@ -229,7 +230,7 @@ __all__ = ['WanModel']
 def sinusoidal_embedding_1d(dim, position):
     assert dim % 2 == 0
     half = dim // 2
-    position = position.type(torch.float64)
+    position = position.float()  # NPU: float32 避免 double 算子不兼容
 
     sinusoid = torch.outer(
         position, torch.pow(10000, -torch.arange(half).to(position).div(half)))
@@ -237,18 +238,19 @@ def sinusoidal_embedding_1d(dim, position):
     return x
 
 
-@torch.amp.autocast('cuda', enabled=False)
+@torch.amp.autocast(get_device_type(), enabled=False)
 def rope_params(max_seq_len, dim, theta=10000):
     assert dim % 2 == 0
+    # 使用 float32 以生成 complex64 — Ascend NPU 不支持 complex128 算子
     freqs = torch.outer(
         torch.arange(max_seq_len),
         1.0 / torch.pow(theta,
-                        torch.arange(0, dim, 2).to(torch.float64).div(dim)))
+                        torch.arange(0, dim, 2).float().div(dim)))
     freqs = torch.polar(torch.ones_like(freqs), freqs)
     return freqs
 
 
-@torch.amp.autocast('cuda', enabled=False)
+@torch.amp.autocast(get_device_type(), enabled=False)
 def rope_apply(x, grid_sizes, freqs):
     n, c = x.size(2), x.size(3) // 2
     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
@@ -257,18 +259,18 @@ def rope_apply(x, grid_sizes, freqs):
         seq_len = f * h * w
         x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float32).reshape(
             seq_len, n, -1, 2))
-        freqs_i = torch.cat([
-            freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-            freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-            freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-        ],
-                            dim=-1).reshape(seq_len, 1, -1)
+        # NPU aclnnCat on complex64 → AI CPU. Work in real space.
+        _f0r = torch.view_as_real(freqs[0][:f]).reshape(f, 1, 1, -1, 2).expand(f, h, w, -1, 2)
+        _f1r = torch.view_as_real(freqs[1][:h]).reshape(1, h, 1, -1, 2).expand(f, h, w, -1, 2)
+        _f2r = torch.view_as_real(freqs[2][:w]).reshape(1, 1, w, -1, 2).expand(f, h, w, -1, 2)
+        freqs_i = torch.view_as_complex(
+            torch.cat([_f0r, _f1r, _f2r], dim=-2).reshape(seq_len, 1, -1, 2))
         x_i = torch.view_as_real(x_i * freqs_i.to(x_i.dtype)).flatten(2)
         x_i = torch.cat([x_i, x[i, seq_len:]])
         output.append(x_i)
     return torch.stack(output).float()
 
-@torch.amp.autocast('cuda', enabled=False)
+@torch.amp.autocast(get_device_type(), enabled=False)
 def rope_apply_with_indices(x, grid_sizes, freqs, t_indices=None):
     """
     Apply RoPE to input tensor using precomputed freqs and optional time indices.
@@ -301,25 +303,43 @@ def rope_apply_with_indices(x, grid_sizes, freqs, t_indices=None):
             t_idx = t_idx.to(dtype=torch.long)
 
         if freqs[0].dim() == 3:
-            t_freqs = freqs[0][:, t_idx, :]  # [n, f, c_t]
-            h_freqs = freqs[1][:, :h, :]     # [n, h, c_h]
-            w_freqs = freqs[2][:, :w, :]     # [n, w, c_w]
+            # NPU 不支持 complex128 的 tensor index, 先转 real 再索引
+            _f0 = freqs[0]
+            _is_complex = _f0.is_complex()
+            if _is_complex:
+                _f0 = torch.view_as_real(_f0)
+            _f0_sel = _f0[:, t_idx, :]
+            if _is_complex:
+                t_freqs = torch.view_as_complex(_f0_sel)
+            else:
+                t_freqs = _f0_sel
+            h_freqs = freqs[1][:, :h, :]
+            w_freqs = freqs[2][:, :w, :]
 
-            freqs_i = torch.cat([
-                t_freqs.permute(1, 0, 2).view(f, 1, 1, n, -1).expand(f, h, w, n, -1),
-                h_freqs.permute(1, 0, 2).view(1, h, 1, n, -1).expand(f, h, w, n, -1),
-                w_freqs.permute(1, 0, 2).view(1, 1, w, n, -1).expand(f, h, w, n, -1),
-            ], dim=-1).reshape(seq_len, n, -1)
+            # NPU aclnnCat on complex64 → AI CPU. Work in real space.
+            _tr = torch.view_as_real(t_freqs).permute(1, 0, 2, 3).reshape(f, 1, 1, n, -1, 2).expand(f, h, w, n, -1, 2)
+            _hr = torch.view_as_real(h_freqs).permute(1, 0, 2, 3).reshape(1, h, 1, n, -1, 2).expand(f, h, w, n, -1, 2)
+            _wr = torch.view_as_real(w_freqs).permute(1, 0, 2, 3).reshape(1, 1, w, n, -1, 2).expand(f, h, w, n, -1, 2)
+            freqs_i = torch.view_as_complex(
+                torch.cat([_tr, _hr, _wr], dim=-2).reshape(seq_len, n, -1, 2))
         else:
-            t_freqs = freqs[0][t_idx]
+            # NPU 不支持 complex128 的 tensor index
+            _f0 = freqs[0]
+            if _f0.is_complex():
+                _f0 = torch.view_as_real(_f0)
+                _f0 = _f0[t_idx]
+                t_freqs = torch.view_as_complex(_f0)
+            else:
+                t_freqs = _f0[t_idx]
             h_freqs = freqs[1][:h]
             w_freqs = freqs[2][:w]
 
-            freqs_i = torch.cat([
-                t_freqs.view(f, 1, 1, -1).expand(f, h, w, -1),
-                h_freqs.view(1, h, 1, -1).expand(f, h, w, -1),
-                w_freqs.view(1, 1, w, -1).expand(f, h, w, -1),
-            ], dim=-1).reshape(seq_len, 1, -1)
+            # NPU aclnnCat on complex64 → AI CPU. Work in real space.
+            _tr = torch.view_as_real(t_freqs).reshape(f, 1, 1, -1, 2).expand(f, h, w, -1, 2)
+            _hr = torch.view_as_real(h_freqs).reshape(1, h, 1, -1, 2).expand(f, h, w, -1, 2)
+            _wr = torch.view_as_real(w_freqs).reshape(1, 1, w, -1, 2).expand(f, h, w, -1, 2)
+            freqs_i = torch.view_as_complex(
+                torch.cat([_tr, _hr, _wr], dim=-2).reshape(seq_len, 1, -1, 2))
 
         x_i = torch.view_as_real(x_i * freqs_i.to(x_i.dtype)).flatten(2)
         x_i = torch.cat([x_i, x[i, seq_len:]])
@@ -578,24 +598,24 @@ class WanAttentionBlock(nn.Module):
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
         assert e.dtype == torch.float32
-        with torch.amp.autocast('cuda', dtype=torch.float32):
+        with torch.amp.autocast(get_device_type(), dtype=torch.float32):
             e = (self.modulation.unsqueeze(0) + e).chunk(6, dim=2)
         assert e[0].dtype == torch.float32
 
         if self.use_memory:
-            with torch.amp.autocast('cuda', dtype=torch.float32):
+            with torch.amp.autocast(get_device_type(), dtype=torch.float32):
                 y = self.self_attn(
                     (self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2)).to(x.dtype),
                     seq_lens, grid_sizes, freqs, memory_length,
                     memory_latent_idx=memory_latent_idx,
                     predict_latent_idx=predict_latent_idx, fa_version=fa_version)
         else:
-            with torch.amp.autocast('cuda', dtype=torch.float32):
+            with torch.amp.autocast(get_device_type(), dtype=torch.float32):
                 y = self.self_attn(
                     (self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2)).to(x.dtype),
                     seq_lens, grid_sizes, freqs, fa_version=fa_version)
 
-        with torch.amp.autocast('cuda', dtype=torch.float32):
+        with torch.amp.autocast(get_device_type(), dtype=torch.float32):
             x = x + y * e[2].squeeze(2)
 
         if plucker_emb is not None:
@@ -669,7 +689,7 @@ class WanAttentionBlock(nn.Module):
             y = self.ffn(
                 (self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2)).to(self.ffn[0].weight.dtype))
 
-            with torch.amp.autocast('cuda', dtype=torch.float32):
+            with torch.amp.autocast(get_device_type(), dtype=torch.float32):
                 x = x + y * e[5].squeeze(2)
 
             return x
@@ -703,16 +723,17 @@ class Head(nn.Module):
             e(Tensor): Shape [B, L1, C]
         """
         assert e.dtype == torch.float32
-        with torch.amp.autocast('cuda', dtype=torch.float32):
+        with torch.amp.autocast(get_device_type(), dtype=torch.float32):
             e = (self.modulation.unsqueeze(0) + e.unsqueeze(2)).chunk(2, dim=2)
             
             # --- Linear Layer Profiling (Head) ---
             if profiler is not None and 'linear_layers' in profiler:
                 norm_x = self.norm(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2)
-                torch.cuda.synchronize()
+                from wan.npu_utils import synchronize as _sync
+                _sync()
                 l_start = time.time()
                 x = self.head(norm_x)
-                torch.cuda.synchronize()
+                _sync()
                 l_dur = time.time() - l_start
                 key = ("Head.head", self.head.in_features, self.head.out_features, "Int8Linear" if hasattr(self.head, "weight_int8") else "Linear")
                 profiler['linear_layers'][key] = profiler['linear_layers'].get(key, 0.0) + l_dur
@@ -845,14 +866,15 @@ class WanModel(ModelMixin, ConfigMixin):
                 c_t = c - 2 * (c // 3)
                 c_h = c // 3
                 c_w = c // 3
-                rope_epsilon = torch.linspace(-1, 1, num_heads, dtype=torch.float64)
+                # NPU: 使用 float32 避免 complex128 (Ascend 不支持 complex128 算子)
+                rope_epsilon = torch.linspace(-1, 1, num_heads, dtype=torch.float32)
                 theta_base = 10000.0
                 theta_hat = theta_base * (1 + sigma_theta * rope_epsilon)
 
                 def build_freqs(seq_len, c_part):
-                    exp = torch.arange(c_part, dtype=torch.float64) / c_part
+                    exp = torch.arange(c_part, dtype=torch.float32) / c_part
                     omega = 1.0 / torch.pow(theta_hat.unsqueeze(1), exp.unsqueeze(0))
-                    pos = torch.arange(seq_len, dtype=torch.float64)
+                    pos = torch.arange(seq_len, dtype=torch.float32)
                     angles = pos.view(1, -1, 1) * omega.unsqueeze(1)
                     return torch.polar(torch.ones_like(angles), angles)
 
@@ -956,7 +978,7 @@ class WanModel(ModelMixin, ConfigMixin):
                 t, t.new_zeros(t.size(0), seq_len - t.size(1))
             ], dim=1)
 
-        with torch.amp.autocast('cuda', dtype=torch.float32):
+        with torch.amp.autocast(get_device_type(), dtype=torch.float32):
             bt = t.size(0)
             t = t.flatten()
             e = self.time_embedding(

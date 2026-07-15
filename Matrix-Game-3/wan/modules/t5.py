@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .tokenizers import HuggingfaceTokenizer
+from wan.npu_utils import get_device as _get_npu_device
 
 __all__ = [
     'T5Model',
@@ -473,11 +474,13 @@ class T5EncoderModel:
         self,
         text_len,
         dtype=torch.bfloat16,
-        device=torch.cuda.current_device(),
+        device=None,
         checkpoint_path=None,
         tokenizer_path=None,
         shard_fn=None,
     ):
+        if device is None:
+            device = _get_npu_device()
         self.text_len = text_len
         self.dtype = dtype
         self.device = device

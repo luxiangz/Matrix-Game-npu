@@ -10,9 +10,17 @@ warnings.filterwarnings('ignore')
 from PIL import Image
 from wan.configs import MAX_AREA_CONFIGS, WAN_CONFIGS
 from wan.distributed.util import init_distributed_group
+from wan.npu_utils import (
+    get_device_type, get_dist_backend, set_device, synchronize, init_npu,
+)
 from pipeline.inference_interactive_pipeline import MatrixGame3Pipeline as MatrixGame3InteractivePipeline
 from pipeline.inference_pipeline import MatrixGame3Pipeline
 from utils.misc import set_seed
+
+# NPU 环境初始化 (allow_internal_format 等, 幂等)
+init_npu()
+
+
 def _validate_args(args):
     if args.ulysses_size <= 1:
         if args.t5_fsdp or args.dit_fsdp:
@@ -76,7 +84,14 @@ def _parse_args():
     parser.add_argument('--fa_version', type=str, default=None, choices=['0', '2', '3'], help='Flash Attention version (2 or 3). Set to 0 to disable.')
     parser.add_argument("--interactive", action="store_true", help="Enable interactive inference.")
     parser.add_argument("--use_base_model", action="store_true", help="Enable base model inference.")
+    parser.add_argument("--no_overlay", action="store_true", help="Disable keyboard/mouse overlay in output video.")
+    parser.add_argument("--profile", action="store_true", help="Profile DiT forward per iteration (clip 0+1), save chrome trace.")
+    parser.add_argument("--profile_stack", action="store_true", help="Include Python call stack in profile trace (larger file).")
+    parser.add_argument("--profile_trace", type=str, default=None, help="Custom prefix for profile trace files (default: {save_name}_profile).")
     args = parser.parse_args()
+    # 将 fa_version 同步到环境变量, attention.py 在 import 时已读取
+    if args.fa_version is not None:
+        os.environ["WAN_FA_VERSION"] = args.fa_version
     _validate_args(args)
     return args
 
@@ -99,9 +114,9 @@ def generate(args):
     set_seed(args.seed)
 
     if world_size > 1:
-        torch.cuda.set_device(local_rank)
+        set_device(local_rank)
         dist.init_process_group(
-            backend="nccl",
+            backend=get_dist_backend(),
             init_method="env://",
             rank=rank,
             world_size=world_size)
@@ -180,7 +195,7 @@ def generate(args):
         use_base_model=args.use_base_model,
         args=args)
 
-    torch.cuda.synchronize()
+    synchronize()
     if dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()

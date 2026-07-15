@@ -2,10 +2,12 @@ import torch
 import torch.nn as nn
 from typing import Any, List, Tuple, Optional, Union, Dict
 from einops import rearrange
-from .attention import FLASH_ATTN_3_AVAILABLE, FLASH_ATTN_2_AVAILABLE
-if FLASH_ATTN_3_AVAILABLE:
+from wan.npu_utils import get_attention_backend
+
+_attn_backend = get_attention_backend()
+if _attn_backend == "fa3":
     import flash_attn_interface as flash_attn_ops
-elif FLASH_ATTN_2_AVAILABLE:
+elif _attn_backend == "fa2":
     import flash_attn as flash_attn_ops
 else:
     flash_attn_ops = None
@@ -30,7 +32,7 @@ class WanRMSNorm(nn.Module):
 def sinusoidal_embedding_1d(dim, position):
     assert dim % 2 == 0
     half = dim // 2
-    position = position.type(torch.float64)
+    position = position.float()  # NPU: float32 避免 double 算子不兼容
 
     sinusoid = torch.outer(position, torch.pow(10000, -torch.arange(half).to(position).div(half)))
     x = torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1)

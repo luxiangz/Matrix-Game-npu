@@ -18,7 +18,8 @@ def init_distributed_group():
     """r initialize sequence parallel group.
     """
     if dist.is_available() and not dist.is_initialized():
-        dist.init_process_group(backend='nccl')
+        from ..npu_utils import get_dist_backend
+        dist.init_process_group(backend=get_dist_backend())
 
 
 def get_rank():
