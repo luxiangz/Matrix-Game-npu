@@ -491,7 +491,8 @@ class MatrixGame3Pipeline:
                             selected_index_base,
                             use_gpu=True
                         )
-                        selected_index[-1] = 4
+                        if len(selected_index) > 0:
+                            selected_index[-1] = 4
                         selected_index_base = [current_end_frame_idx - o for o in range(1, _lookback, _skip)]
                     else:
                         selected_index = [0] * num_mem_frames
