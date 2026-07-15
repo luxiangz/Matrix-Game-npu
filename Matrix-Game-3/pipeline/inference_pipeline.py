@@ -626,9 +626,12 @@ class MatrixGame3Pipeline:
                             record_shapes=True, profile_memory=True,
                             with_stack=getattr(args, 'profile_stack', False))
 
+                # NPU graph capture state (per-iteration)
+                _npu_graph = None; _graph_x = None; _graph_t = None; _graph_out = None
+                _use_npu_graph = (on_npu and not use_base_model
+                                  and getattr(args, 'npu_graph', False))
+
                 for step_idx, t in enumerate(tqdm(timesteps, disable=(self.rank != 0))):
-                    # NPU profiler: warmup step 0, profile step 1 only (avoids 1st-step
-                    # kernel compilation skew + keeps overhead minimal)
                     _profile_this_step = (do_profile and _profiler and step_idx == 1)
                     if _profile_this_step:
                         _profiler.start()
@@ -652,6 +655,28 @@ class MatrixGame3Pipeline:
                         "seq_len": max_seq_len,
                         **conditions_null
                     }
+
+                    # NPU graph: step0 warmup → step1 capture → step2+ replay
+                    if _use_npu_graph and step_idx >= 1:
+                        if step_idx == 1:
+                            _graph_x = latent_model_input.clone()
+                            _graph_t = timestep.clone()
+                            model_kwargs['x'] = _graph_x
+                            model_kwargs['t'] = _graph_t
+                            _npu_graph = torch.npu.NPUGraph()
+                            with torch.npu.graph(_npu_graph, pool=torch.npu.graph_pool_handle()):
+                                _graph_out = self.model(**model_kwargs)
+                            noise_pred = _graph_out
+                        else:
+                            _graph_x.copy_(latent_model_input)
+                            _graph_t.copy_(timestep)
+                            _npu_graph.replay()
+                            noise_pred = _graph_out
+                        latents = test_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                        latents = torch.cat([img_cond, latents[:,:,img_cond.shape[2]:]], dim=2)
+                        if _profile_this_step: _profiler.step(); _profiler.stop()
+                        continue
+
                     if use_base_model:
                         noise_pred_full = self.model(**model_kwargs)
                         noise_pred_null = self.model(**model_kwargs_null)

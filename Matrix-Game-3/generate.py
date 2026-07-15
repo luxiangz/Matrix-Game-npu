@@ -88,6 +88,7 @@ def _parse_args():
     parser.add_argument("--profile", action="store_true", help="Profile DiT forward per iteration (clip 0+1), save chrome trace.")
     parser.add_argument("--profile_stack", action="store_true", help="Include Python call stack in profile trace (larger file).")
     parser.add_argument("--profile_trace", type=str, default=None, help="Custom prefix for profile trace files (default: {save_name}_profile).")
+    parser.add_argument("--npu_graph", action="store_true", help="Use torch.npu.NPUGraph capture/replay for DiT forward.")
     args = parser.parse_args()
     # 将 fa_version 同步到环境变量, attention.py 在 import 时已读取
     if args.fa_version is not None:
