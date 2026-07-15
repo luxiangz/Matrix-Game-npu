@@ -422,7 +422,8 @@ class MatrixGame3Pipeline:
             dist.broadcast(img_cond, src=0)
 
         max_lat_f = (first_clip_frame - 1) // self.vae_stride[0] + 1
-        max_mem_f = 5
+        num_mem_frames = getattr(args, 'num_memory_frames', 5)
+        max_mem_f = num_mem_frames
         max_total_f = max_lat_f + max_mem_f
         max_seq_len = max_total_f * lat_h * lat_w // (self.patch_size[1] * self.patch_size[2])
 
@@ -481,18 +482,22 @@ class MatrixGame3Pipeline:
                 else:                   
                     if self.rank == 0:
                         mem_end = ((current_start_frame_idx - 1) // 4 * 4 + 1) if current_start_frame_idx > 1 else 1
-                        selected_index_base = [current_end_frame_idx - o for o in range(1, 34, 8)]
+                        _skip = max(1, 32 // (num_mem_frames - 1)) if num_mem_frames > 1 else 1
+                        _lookback = _skip * (num_mem_frames - 1) + 2
+                        selected_index_base = [current_end_frame_idx - o for o in range(1, _lookback, _skip)]
                         selected_index = select_memory_idx_fov(
                             extrinsics_all,
                             current_start_frame_idx,
                             selected_index_base,
                             use_gpu=True
                         )
-                        selected_index[-1] = 4 
-                        selected_index_base = [current_end_frame_idx - o for o in range(1, 34, 8)]
+                        selected_index[-1] = 4
+                        selected_index_base = [current_end_frame_idx - o for o in range(1, _lookback, _skip)]
                     else:
-                        selected_index = [0] * 5 
-                        selected_index_base = [current_end_frame_idx - o for o in range(1, 34, 8)]
+                        selected_index = [0] * num_mem_frames
+                        _skip = max(1, 32 // (num_mem_frames - 1)) if num_mem_frames > 1 else 1
+                        _lookback = _skip * (num_mem_frames - 1) + 2
+                        selected_index_base = [current_end_frame_idx - o for o in range(1, _lookback, _skip)]
 
                     if dist.is_initialized():
                         dist.broadcast_object_list(selected_index, src=0)

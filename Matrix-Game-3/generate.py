@@ -62,6 +62,7 @@ def _parse_args():
     parser.add_argument("--seed", type=int, default=42, help="The seed to use for generating the video.")
     parser.add_argument("--image", type=str, default=None, help="The image to generate the video from.")
     parser.add_argument('--num_iterations', type=int, default=12)
+    parser.add_argument('--num_memory_frames', type=int, default=5, help='Number of memory key frames for long-horizon consistency (default: 5).')
     parser.add_argument("--convert_model_dtype", action="store_true", default=False, help="Whether to convert model paramerters dtype.")
     parser.add_argument('--output_dir', type=str, default="./output")
     parser.add_argument('--save_name', type=str, default="generated_video")
